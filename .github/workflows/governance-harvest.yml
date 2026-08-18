@@ -364,20 +364,43 @@ jobs:
             in_flight=$(printf '%s' "$buckets" | jq '[.[]|select(.=="pending")]|length')
             broken=$(printf '%s' "$buckets" | jq '[.[]|select(.=="fail" or .=="cancel")]|length')
 
-            if [ "${in_flight:-0}" -gt 0 ]; then
-              echo "harvest PR #$open_pr has ${in_flight} check(s) in flight — leaving it to converge"
-              emit_landed "waiting on #$open_pr"
-              exit 0
-            fi
-            if [ "${broken:-0}" -eq 0 ] && [ "$pr_state" != "BEHIND" ]; then
-              echo "harvest PR #$open_pr is idle and healthy — leaving it alone"
-              emit_landed "waiting on #$open_pr"
-              exit 0
-            fi
-            echo "::warning::harvest PR #$open_pr is stuck (mergeState=$pr_state, failed/cancelled checks=${broken:-0}) — rebuilding it on current main to re-trigger CI"
+            # The decision itself lives in .github/scripts/harvest-triage.sh so
+            # it can be unit-tested. Every bug in this subsystem has been in
+            # this decision, and each one was found on a stalled PR rather than
+            # in CI.
+            decision=$(.github/scripts/harvest-triage.sh "$pr_state" "${in_flight:-0}" "${broken:-0}")
+            case "$decision" in
+              wait)
+                echo "harvest PR #$open_pr has ${in_flight} check(s) in flight — leaving it to converge"
+                emit_landed "waiting on #$open_pr"
+                exit 0
+                ;;
+              leave)
+                echo "harvest PR #$open_pr is idle and healthy — leaving it alone"
+                emit_landed "waiting on #$open_pr"
+                exit 0
+                ;;
+              repair) ;;
+              *)
+                echo "::error::harvest-triage.sh returned '$decision', which is not a decision"
+                exit 1
+                ;;
+            esac
+            echo "::warning::harvest PR #$open_pr is stuck (mergeState=$pr_state, in-flight=${in_flight:-0}, failed/cancelled=${broken:-0}) — closing it so a fresh one can be opened"
+            # CLOSE it rather than force-push a fix onto it. Pushing to an
+            # existing PR does not make its required checks report: #593 was
+            # rebuilt cleanly, the conflict went away, and the queue still
+            # answered "19 of 19 required status checks are expected" because
+            # zero workflow runs fired on the new head. Opening a PR as the App
+            # does trigger them (#575, #576, #579, #593 all ran on creation),
+            # so the reliable repair is close-then-recreate. Nothing is lost:
+            # every line is re-derived from the run artifacts below.
+            gh pr close "$open_pr" --comment "Superseded automatically: this PR could not merge (mergeState=$pr_state, failed or cancelled checks=${broken:-0}). A pushed fix would not make its required checks report, so the harvest opens a fresh PR with the same ledger instead." \
+              || echo "::warning::could not close #$open_pr; the next harvest will try again"
             repair=1
-            # fall through: the rebuild below force-updates the branch, which
-            # refreshes the PR against current main and restarts its checks.
+            # fall through: the branch is force-recreated below and, with no
+            # open PR left on it, the create path opens a new one whose checks
+            # actually run.
           fi
 
           # Nothing to do if the rolling branch already carries exactly this
