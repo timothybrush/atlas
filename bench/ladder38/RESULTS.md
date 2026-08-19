@@ -932,6 +932,77 @@ like-for-like. Do not fold such a number into the certified column.
 the right mitigation, but it must be applied to BOTH engines or reported as a separate
 configuration.)
 
+### NEGATIVE RESULT (2026-08-19) — `decode_tps` is NOT a tighter gate than `s_per_turn`
+
+atlas#581 made `s_per_turn` the agentic speed bound and recorded `decode_tps`
+(tokens / agent-wall) unbounded, with a note that tokens are "the honest denominator" and
+that a future change should ratchet onto it. Six measured tiers say **do not**.
+
+| tier | `sum_turns` | `s_per_turn` | `decode_tps` |
+|---:|---:|---:|---:|
+| 1 | 115 | 7.000 | 34.384 |
+| 2 | 127 | 7.118 | 34.229 |
+| 3 | 117 | 6.928 | 34.218 |
+| 4 | 133 | 7.018 | 33.876 |
+| 5 | 114 | 6.452 | 33.747 |
+| 6 | 111 | 7.099 | **30.966** |
+
+| metric | min | max | spread |
+|---|---:|---:|---:|
+| `sum_turns` | 111 | 133 | 19.8% |
+| `s_per_turn` | 6.452 | 7.118 | **10.3%** |
+| `decode_tps` | 30.966 | 34.384 | **11.0%** |
+
+**The two bounds are equally noisy, and `decode_tps` is marginally worse.**
+
+★ This conclusion REVERSES at five tiers, which is the trap. Through tier 5 `decode_tps`
+spanned only 1.9% against `s_per_turn`'s 10.3% — a five-times-tighter result that looked
+like a clear mandate to ratchet. Tier 6 came in at 30.966 (8% below the previous minimum)
+while its `s_per_turn` of 7.099 sat mid-range, and the advantage vanished. Anyone who stops
+at five tiers will conclude the opposite of the truth.
+
+Tier 5 is the other warning: it is the FASTEST tier per turn (6.452) and the SLOWEST per
+token of the first five (33.747). The two metrics do not even rank runs the same way, so
+"tokens are more physical" is not by itself a reason to prefer one.
+
+**Action: none.** `s_per_turn` stays the bound; `decode_tps`, `sum_turns`,
+`sum_agent_wall_s` and `sum_tool_calls` stay recorded and unbounded — they are worth having
+for diagnosis, which is what tier 6 just demonstrated. Do not re-derive this from a short
+run.
+
+### C=16 K-LADDER SWEEP (2026-08-19) — the shipped value is optimal, and K=3 does not FIT
+
+After the same-day sweep left C=16 as the thinnest confirmed rung (1.016x, down from a
+certified 1.032x), its K ladder was swept the way C=8's was. Atlas-only, one box (dgx1),
+back-to-back, so only the relative ordering is claimed:
+
+| `16:K` | mean tok/s | vs shipped |
+|---:|---:|---:|
+| **16:1 (shipped)** | **194.06** | — |
+| 16:2 | 186.17 | -4.1% |
+| 16:3 | **would not start** | — |
+
+(dgx1 absolutes; the dgx2 figure for this rung is 201.32. Cross-box absolutes are not
+comparable — only the within-box ordering above is.)
+
+**16:3 is not slower, it is INFEASIBLE.** It fails at model build, and the failure was
+reproduced on a GPU verified idle beforehand (0 compute apps) so it is not residue from a
+previous serve — identical numbers both times:
+
+```
+No memory left for KV cache: total GPU = 121.7 GB, util 85% -> budget 103.4 GB,
+but 60.4 GB already consumed + 43.4 GB inference reserve = 103.8 GB
+```
+
+It misses by **0.4 GB**. The verify-pool reserve grows with K, so the K ladder at this rung
+is bounded by memory before it is bounded by throughput — a harder constraint than "we
+measured it and it was worse", and the reason no amount of tuning opens C=16 up.
+
+Together with the C=8 sweep (8:2 shipped beats 8:1 by 4.1% and 8:3 by 5.1%), **both
+mid-ladder rungs sit on their optimum in both directions.** The narrow margins there are a
+property of the rungs, not a missed setting, and widening them needs a kernel-level change.
+Recorded so neither sweep is run a third time.
+
 ### Round 11 complete — the full ladder, independently reproduced
 
 | C | round 11 | round 10 | vLLM+MTP | ratio |
