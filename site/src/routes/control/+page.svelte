@@ -331,11 +331,20 @@
           {:else if fleet.mode === 'browser_unpaired'}
             <div class="ctl-setup">
               <h2>Pair this browser with your agent</h2>
+              <!-- The reason, when the handshake gave one. `#scheduleProbe` sets
+                   `detail` on this path too, and it was rendered nowhere: the
+                   `{#if fleet.detail}` added with the no_agent panel covered only
+                   that branch, so an operator here was told to paste a token
+                   without being told what the agent actually said. -->
+              {#if fleet.detail}
+                <p class="ld-error" role="alert">{fleet.detail}</p>
+              {/if}
               <p>
                 An agent is running, but it has not seen this browser before. Run
-                <code class="mono">atlasctl agent token</code> and paste the value the
-                launch dialog asks for. This is separate from pairing machines to each
-                other.
+                <code class="mono">atlasctl agent token</code> and paste the value into the
+                launch dialog on the <a href="/">home page</a> — that is where the token
+                field lives, not here. This page notices on its own once you have; it keeps
+                looking. This is separate from pairing machines to each other.
               </p>
             </div>
           {:else}
