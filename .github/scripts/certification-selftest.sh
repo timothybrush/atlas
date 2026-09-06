@@ -124,6 +124,85 @@ Y
 want_rc 1 "control: checkout with no explicit ref on the command runner" \
   sh -c "cd '$TMP/wf' && python3 assert-cmd-runner-safe.py"
 
+# The cheap PR pool runs PR code on purpose, so its whole safety property is the
+# same-repo comparison in `runs-on`. These three controls are that property.
+cat > "$TMP/wf/.github/workflows/a.yml" <<'Y'
+on: { pull_request: { types: [opened] } }
+jobs: { j: { runs-on: atlas-pr-cheap, steps: [{ uses: actions/checkout@v4 }] } }
+Y
+want_rc 1 "control: cheap pool on pull_request with no same-repo guard" \
+  sh -c "cd '$TMP/wf' && python3 assert-cmd-runner-safe.py"
+cat > "$TMP/wf/.github/workflows/a.yml" <<'Y'
+on: { pull_request: { types: [opened] } }
+jobs: { j: { runs-on: "${{ vars.PR_CHEAP_RUNNER || 'ubuntu-latest' }}", steps: [{ uses: actions/checkout@v4 }] } }
+Y
+want_rc 1 "control: cheap pool via the variable, still unguarded" \
+  sh -c "cd '$TMP/wf' && python3 assert-cmd-runner-safe.py"
+# Guarded, but then hands the runner a fork ref explicitly -- the guard chooses
+# the RUNNER, it does not choose what gets checked out.
+cat > "$TMP/wf/.github/workflows/a.yml" <<'Y'
+on: { pull_request: { types: [opened] } }
+jobs:
+  j:
+    runs-on: "${{ github.event.pull_request.head.repo.full_name == github.repository && 'atlas-pr-cheap' || 'ubuntu-latest' }}"
+    steps: [{ uses: actions/checkout@v4, with: { ref: "${{ github.event.pull_request.head.sha }}" } }]
+Y
+want_rc 1 "control: cheap pool guarded but checking out a fork ref" \
+  sh -c "cd '$TMP/wf' && python3 assert-cmd-runner-safe.py"
+# And the shape we actually ship must PASS, or the rule is unusable.
+cat > "$TMP/wf/.github/workflows/a.yml" <<'Y'
+on: { pull_request: { types: [opened] } }
+jobs:
+  j:
+    runs-on: "${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.PR_CHEAP_RUNNER || 'ubuntu-latest') || 'ubuntu-latest' }}"
+    steps: [{ uses: actions/checkout@v4 }]
+Y
+want_rc 0 "the shipped cheap-pool routing shape is accepted" \
+  sh -c "cd '$TMP/wf' && python3 assert-cmd-runner-safe.py"
+
+echo "== a required check cannot be cancelled by comment timing =="
+want_rc 0 "the workflows as they stand are safe" \
+  python3 .github/scripts/assert-required-checks-not-comment-cancellable.py
+mkdir -p "$TMP/cc/.github/workflows"
+# CONTROL: the exact shape that blocked #907 -- required context + comment
+# trigger + cancel-in-progress.
+cat > "$TMP/cc/.github/workflows/a.yml" <<'Y'
+on: { issue_comment: { types: [created] } }
+concurrency: { group: g, cancel-in-progress: true }
+jobs: { CLAAssistant: { name: CLAAssistant, runs-on: ubuntu-latest, steps: [{ run: "true" }] } }
+Y
+want_rc 1 "control: required check cancellable by a comment" \
+  python3 .github/scripts/assert-required-checks-not-comment-cancellable.py "$TMP/cc"
+# A job-level concurrency block must be seen too, not just the workflow one.
+cat > "$TMP/cc/.github/workflows/a.yml" <<'Y'
+on: { issue_comment: { types: [created] } }
+jobs:
+  CLAAssistant:
+    name: CLAAssistant
+    runs-on: ubuntu-latest
+    concurrency: { group: g, cancel-in-progress: true }
+    steps: [{ run: "true" }]
+Y
+want_rc 1 "control: job-level concurrency is checked as well" \
+  python3 .github/scripts/assert-required-checks-not-comment-cancellable.py "$TMP/cc"
+# NOT flagged: a push-triggered required check. There a cancellation is a
+# supersession and the replacement run reports, so forbidding it would be wrong.
+cat > "$TMP/cc/.github/workflows/a.yml" <<'Y'
+on: { pull_request: { types: [opened] } }
+concurrency: { group: g, cancel-in-progress: true }
+jobs: { typos: { name: typos, runs-on: ubuntu-latest, steps: [{ run: "true" }] } }
+Y
+want_rc 0 "a push-triggered required check may still cancel itself" \
+  python3 .github/scripts/assert-required-checks-not-comment-cancellable.py "$TMP/cc"
+# NOT flagged: a comment-triggered job that is not a required context.
+cat > "$TMP/cc/.github/workflows/a.yml" <<'Y'
+on: { issue_comment: { types: [created] } }
+concurrency: { group: g, cancel-in-progress: true }
+jobs: { advisory: { name: "PR categorize (advisory)", runs-on: ubuntu-latest, steps: [{ run: "true" }] } }
+Y
+want_rc 0 "a non-required comment-triggered job may cancel itself" \
+  python3 .github/scripts/assert-required-checks-not-comment-cancellable.py "$TMP/cc"
+
 echo "== certificate rendering =="
 T=docs/diagrams/states/certificate-merged.svg
 render() { python3 .github/scripts/render-certificate.py --template "$T" --out "$1" \
@@ -848,7 +927,7 @@ if [ -s "$TMP/stamp.sh" ]; then
 all="$*"
 case "$all" in
   *"actions/runs/"*"/rerun"*) printf 'RERUN %s\n' "$all" >> "$SCALLS"; echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1 ;;
-  *"actions/runs?head_sha"*)  echo 12345; exit 0 ;;
+  *"actions/runs?head_sha"*)  echo "${RUNMETA:-12345 completed}"; exit 0 ;;
   *"issues/"*"/comments"*)    printf '%s\n' "$all" >> "$SCALLS"; exit 0 ;;
   *)                          exit 0 ;;
 esac
@@ -885,6 +964,32 @@ STUB
     ok "control: /seal re-runs CI so seal status is re-evaluated"
   else
     bad "control: /seal minted its mark and never refreshed the job that reads it"
+  fi
+
+  # CONTROL: stamping while CI is still in flight must NOT warn. Re-running an
+  # unfinished run returns 403 "This workflow is already running", which the
+  # warning would report as a failure -- and it is not one: a run still in
+  # flight reads the mark when its gate jobs execute. Found in production the
+  # first time the warning printed the API's own words, which is what it is for.
+  : > "$TMP/scalls"
+  ( PATH="$TMP/sbin:$PATH" SCALLS="$TMP/scalls" RUNMETA="777 queued" REPO=o/r PR=1 VERB=/stamp \
+    ACTOR=me AUTHOR=me PERM=write HEAD_SHA=abc1234567 SHORT=abc1234 \
+    bash "$TMP/stamp.sh" >/dev/null 2>&1 )
+  src=$?
+  if [ "$src" -eq 0 ]; then
+    ok "control: stamping mid-run is not an error"
+  else
+    bad "control: stamping while CI was queued failed the command job"
+  fi
+  if grep -q '^RERUN ' "$TMP/scalls"; then
+    bad "control: it tried to re-run a run that had not finished"
+  else
+    ok "control: a run still in flight is not re-run"
+  fi
+  if grep -q "but CI was not re-run" "$TMP/scalls"; then
+    bad "control: it warned about a benign in-flight run"
+  else
+    ok "control: and no false warning is posted"
   fi
 else
   bad "could not extract the /stamp step"
@@ -998,6 +1103,43 @@ want_rc_msg 1 "no known static root" "control: a site-root link from an unknown 
 # deploy time, so requiring it in the tree would fail every PR forever.
 dl_tree; printf '[a](/api/spark_model/)\n[b](/api/)\n' > "$TMP/dl/book/src/more.md"
 want_rc 0 "control: generated /api/ paths are not treated as breakage" dl_run
+
+# ---------------------------------------------------------------------------
+# Commands that exist only in a workflow file
+# ---------------------------------------------------------------------------
+# Three of the five -- /help, /review and /expedite -- were accepted by the bot
+# and mentioned nowhere in the README. /expedite skips certification outright.
+# All three arrived during this record's own waves, one commit at a time, and no
+# single change looked like it was leaving something out.
+want_rc 0 "every accepted command is documented" \
+  python3 .github/scripts/assert-commands-documented.py
+mkdir -p "$TMP/cd/.github/workflows"
+cp .github/scripts/assert-commands-documented.py "$TMP/cd/.github/"
+mkdir -p "$TMP/cd/.github/scripts"
+mv "$TMP/cd/.github/assert-commands-documented.py" "$TMP/cd/.github/scripts/"
+
+cd_case() { printf '%s\n' \
+  "jobs:" "  command:" "    steps:" "      - run: |" "          case \"\$VERB\" in" \
+  "            $1) ;;" "            *) exit 0 ;;" "          esac" \
+  > "$TMP/cd/.github/workflows/certification-commands.yml"; }
+
+cd_case '/help|/stamp|/seal'
+printf 'we document /help and /stamp and /seal here.\n' > "$TMP/cd/README.md"
+want_rc 0 "control: a README covering every verb passes" \
+  python3 "$TMP/cd/.github/scripts/assert-commands-documented.py"
+
+cd_case '/help|/stamp|/seal|/expedite'
+want_rc_msg 1 "accepts \`/expedite\`" "control: a command missing from the README is caught" \
+  python3 "$TMP/cd/.github/scripts/assert-commands-documented.py"
+
+# If the case arm is renamed or restructured, the guard must REFUSE rather than
+# find nothing and report success -- a guard that cannot locate its input and
+# passes is the failure mode this whole suite exists to catch.
+printf 'jobs:\n  command:\n    steps:\n      - run: echo no case arm here\n' \
+  > "$TMP/cd/.github/workflows/certification-commands.yml"
+want_rc_msg 1 "could not find the verb whitelist" \
+  "control: a guard that cannot find its input refuses, it does not pass" \
+  python3 "$TMP/cd/.github/scripts/assert-commands-documented.py"
 
 echo
 echo "  $PASS passed, $FAIL failed"
