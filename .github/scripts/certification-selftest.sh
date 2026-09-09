@@ -183,12 +183,25 @@ jobs:
 Y
 want_rc 1 "control: cheap pool guarded but checking out a fork ref" \
   sh -c "cd '$TMP/wf' && python3 assert-cmd-runner-safe.py"
-# And the shape we actually ship must PASS, or the rule is unusable.
+# The fleet gate is required on every self-hosted route. Without it a job on a
+# box that is down does not fail, it QUEUES -- and a queued job creates no check
+# run, so a required context reads as absent rather than red and the PR is
+# unmergeable with nothing showing as broken. This control is that rule.
 cat > "$TMP/wf/.github/workflows/a.yml" <<'Y'
 on: { pull_request: { types: [opened] } }
 jobs:
   j:
     runs-on: "${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.PR_CHEAP_RUNNER || 'ubuntu-latest') || 'ubuntu-latest' }}"
+    steps: [{ uses: actions/checkout@v4 }]
+Y
+want_rc 1 "control: guarded cheap-pool routing WITHOUT the fleet gate" \
+  sh -c "cd '$TMP/wf' && python3 assert-cmd-runner-safe.py"
+# And the shape we actually ship must PASS, or the rule is unusable.
+cat > "$TMP/wf/.github/workflows/a.yml" <<'Y'
+on: { pull_request: { types: [opened] } }
+jobs:
+  j:
+    runs-on: "${{ vars.USE_AVAROK_UBUNTU_RUNNERS == '1' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.PR_CHEAP_RUNNER || 'ubuntu-latest') || 'ubuntu-latest' }}"
     steps: [{ uses: actions/checkout@v4 }]
 Y
 want_rc 0 "the shipped cheap-pool routing shape is accepted" \
@@ -2428,6 +2441,34 @@ want_rc_msg 1 "does not export 'zzz'" "control: an unexported consumer is caught
 rm -rf "$TMP/jo/.github/workflows"; mkdir -p "$TMP/jo/.github/workflows"
 want_rc_msg 1 "no workflow files found" "control: a guard that finds nothing must fail" \
   sh -c "cd '$TMP/jo' && python3 '$PWD/.github/scripts/assert-job-outputs-exported.py'"
+
+echo "== stuck runs are recognised before they can hide =="
+# A run that never creates a job publishes no check run, so a required context
+# it owns reads as ABSENT rather than red -- the PR cannot merge and nothing is
+# showing as broken. Each control below is a case that MUST NOT be swept, and
+# each rules out a real, healthy situation.
+STUCK='.github/scripts/stuck-runs.py'
+want_out "1" "a queued run with no jobs, past the threshold, is selected" \
+  sh -c "printf '%s' '{\"now\":\"2026-01-01T12:00:00Z\",\"threshold_minutes\":25,\"runs\":[{\"id\":1,\"status\":\"queued\",\"created_at\":\"2026-01-01T11:00:00Z\",\"job_count\":0}]}' | python3 $STUCK"
+# Control: a run waiting on a busy hosted pool is queued with no jobs and is
+# entirely healthy. Sweeping it would force-cancel real work.
+want_out "SWEPT-NOTHING" "control: a young queued run is left alone" \
+  sh -c "printf '%s' '{\"now\":\"2026-01-01T12:00:00Z\",\"threshold_minutes\":25,\"runs\":[{\"id\":2,\"status\":\"queued\",\"created_at\":\"2026-01-01T11:50:00Z\",\"job_count\":0}]}' | python3 $STUCK && echo SWEPT-NOTHING"
+# Control: a run that HAS jobs is merely slow, and is somebody else's problem.
+want_out "SWEPT-NOTHING" "control: a queued run that created jobs is left alone" \
+  sh -c "printf '%s' '{\"now\":\"2026-01-01T12:00:00Z\",\"threshold_minutes\":25,\"runs\":[{\"id\":3,\"status\":\"queued\",\"created_at\":\"2026-01-01T11:00:00Z\",\"job_count\":4}]}' | python3 $STUCK && echo SWEPT-NOTHING"
+# Control: an unresolved job count is NOT zero. Treating it as zero is the
+# fail-open direction, and it would cancel healthy runs whenever the jobs API
+# hiccups.
+want_out "SWEPT-NOTHING" "control: an unknown job count is not treated as zero" \
+  sh -c "printf '%s' '{\"now\":\"2026-01-01T12:00:00Z\",\"threshold_minutes\":25,\"runs\":[{\"id\":4,\"status\":\"queued\",\"created_at\":\"2026-01-01T11:00:00Z\",\"job_count\":null}]}' | python3 $STUCK && echo SWEPT-NOTHING"
+# Control: a guard that cannot read its input must refuse. Exiting 0 there would
+# report "nothing stuck" for every run forever, which is indistinguishable from
+# a healthy repo -- the exact way a dead guard survives.
+want_rc 2 "control: unreadable input is refused, not passed" \
+  sh -c "printf 'not json' | python3 $STUCK"
+want_rc 2 "control: a payload with no threshold is refused" \
+  sh -c "printf '%s' '{\"runs\":[]}' | python3 $STUCK"
 
 echo
 echo "  $PASS passed, $FAIL failed"
