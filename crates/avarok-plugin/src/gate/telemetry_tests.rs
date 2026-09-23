@@ -350,8 +350,10 @@ fn debt_is_derived_from_the_prs_own_paths() {
     ];
     let views = super::views(&root, &prs);
     // The discrimination is real: the docs PR owes nothing, the engine PR
-    // owes BOTH candidates — a scheduler edit can cross-wire concurrent
-    // requests AND make a reply depend on what ran before it.
+    // owes the contamination candidate — a scheduler edit can cross-wire
+    // concurrent requests. (The MoE ladder was the second entry here from
+    // 2026-09-20 until its 2026-09-23 promotion; a required gate is owed as
+    // a gate, never as debt.)
     assert_eq!(views[0].promotion_debt, Vec::<&str>::new());
     assert_eq!(views[1].promotion_debt, vec!["cross-contamination"]);
 }

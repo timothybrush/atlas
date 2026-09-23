@@ -218,6 +218,14 @@ const GATE_MACHINERY_FILES: &[&str] = &[
     // `serve_resolved_never_reaches_check_record` pins that — so no edit here
     // can move a verdict.
     "crates/avarok-plugin/src/gate/record_serve.rs",
+    // `record_env.rs` names what a record DISCLOSES about its server's
+    // environment (`perf_env`, and since #1242 the whole applied `serve_env`
+    // lever set); `record_summary.rs` is the record's one-line summary and
+    // its clock. Both are exact piecewise moves out of `record.rs` at the
+    // 500-line cap, classified as their parent is: `check_record` demands
+    // neither field, so no edit here can move a verdict.
+    "crates/avarok-plugin/src/gate/record_env.rs",
+    "crates/avarok-plugin/src/gate/record_summary.rs",
     // Rendering and reporting only.
     "crates/avarok-plugin/src/gate/card.rs",
     "crates/avarok-plugin/src/gate/check_fmt.rs",
@@ -328,6 +336,15 @@ pub const TEST_ONLY_RUST_MODULES: &[TestOnlyRustModule] = &[
         parent: "crates/avarok-plugin/src/benchmarks/concurrency.rs",
         name: "concurrency_verdict_tests",
         declared_path: Some("concurrency_verdict_tests.rs"),
+    },
+    // The MoE ladder's descriptor tests, in a third file because both
+    // concurrency test files sit at the 500-line cap. Same parent, same
+    // proof, same reason: a test edit here must not re-open a GPU record.
+    TestOnlyRustModule {
+        path: "crates/avarok-plugin/src/benchmarks/concurrency_moe_tests.rs",
+        parent: "crates/avarok-plugin/src/benchmarks/concurrency.rs",
+        name: "concurrency_moe_tests",
+        declared_path: Some("concurrency_moe_tests.rs"),
     },
 ];
 
@@ -708,7 +725,7 @@ const VISION_EXCLUDES: &[Exclusion] = &[
 ];
 
 /// The gates whose records must pass, and what each one ignores.
-pub const REQUIRED: [GateCoverage; 12] = [
+pub const REQUIRED: [GateCoverage; 13] = [
     GateCoverage {
         id: "agentic-webserver",
         excludes: AGENTIC_EXCLUDES,
@@ -843,6 +860,28 @@ pub const REQUIRED: [GateCoverage; 12] = [
         id: "kat-equality-gate",
         excludes: KAT_EQUALITY_EXCLUDES,
     },
+    // ── Promoted from PROMOTION_CANDIDATES 2026-09-23 ──────────────────────
+    //
+    // The MoE concurrency ladder: the concurrency driver on the 35B MoE
+    // flagship at the published instrument (`concurrency::MOE_DESCRIPTOR`
+    // says why it is a third gate id rather than a second checkpoint of
+    // `concurrency-sweep`). It shares CONCURRENCY_EXCLUDES because it shares
+    // the driver: exactly the set of foreign drivers that cannot reach either
+    // dense ladder cannot reach this one, and everything in the engine can.
+    //
+    // The candidate's one precondition was that it cannot bootstrap inside a
+    // campaign — a REQUIRED gate with no floors would block every PR while
+    // refusing to run under `--pull-request-gate`. Met by hand on 2026-09-23:
+    // three reps on dgx1 at e8a212247c against a self-driven serve of the
+    // pinned profile (zero request errors, zero vacuous cells in every rep),
+    // floors cut together at mean - max(3*sigma, 5%) and committed as
+    // `status = "measured"` in kernels/gb10/qwen3.6-35b-a3b/BENCH.toml in
+    // the same PR as this entry. The campaign certifying that PR writes the
+    // first gated record. Every PR now owes a thirteenth record.
+    GateCoverage {
+        id: "concurrency-sweep-moe",
+        excludes: CONCURRENCY_EXCLUDES,
+    },
 ];
 
 /// Registered benchmarks that are deliberately **not** gates, each with the
@@ -875,8 +914,10 @@ pub const REQUIRED: [GateCoverage; 12] = [
 /// `every_promotion_candidate_is_a_registered_benchmark` pins that.
 ///
 /// ★ The list is the PIPELINE, not a parking lot: `concurrency-sweep` and
-/// `decode-floor` both graduated to [`REQUIRED`] on 2026-08-15, and
-/// `kat-equality-gate` on 2026-09-10, once their calibration preconditions
+/// `decode-floor` both graduated to [`REQUIRED`] on 2026-08-15,
+/// `kat-equality-gate` on 2026-09-10, and `concurrency-sweep-moe` on
+/// 2026-09-23 (a candidate from 2026-09-20, promoted by the PR that committed
+/// its first hand-measured floors), once their calibration preconditions
 /// were met (see the comments on their REQUIRED entries). Their old candidate
 /// entries are gone from here because a gate cannot be owed and excused at
 /// once — the test above pins that.
